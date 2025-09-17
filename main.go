@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"compress/gzip"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -48,12 +49,16 @@ type SyslogServer struct {
 	destinations map[string]*Destination
 	filters      map[string]*Filter
 	mu           sync.RWMutex
+	maxSize      int64
+	maxFiles     int
 }
 
-func NewSyslogServer() *SyslogServer {
+func NewSyslogServer(maxSize int64, maxFiles int) *SyslogServer {
 	server := &SyslogServer{
 		destinations: make(map[string]*Destination),
 		filters:      make(map[string]*Filter),
+		maxSize:      maxSize,
+		maxFiles:     maxFiles,
 	}
 
 	server.setupDefaultDestinations()
@@ -64,8 +69,6 @@ func NewSyslogServer() *SyslogServer {
 
 func (s *SyslogServer) setupDefaultDestinations() {
 	template := "$ISODATE $MSGHDR | $MSG\n"
-	maxSize := int64(1024 * 1024) // 1MB
-	maxFiles := 10
 
 	destinations := []struct {
 		name     string
@@ -78,7 +81,7 @@ func (s *SyslogServer) setupDefaultDestinations() {
 	}
 
 	for _, dest := range destinations {
-		if err := s.createDestination(dest.name, dest.path, template, dest.rotating, maxSize, maxFiles); err != nil {
+		if err := s.createDestination(dest.name, dest.path, template, dest.rotating, s.maxSize, s.maxFiles); err != nil {
 			log.Printf("Warning: Failed to create destination %s: %v", dest.name, err)
 		}
 	}
@@ -532,16 +535,53 @@ func (s *SyslogServer) Close() error {
 var version = "dev"
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
+	// Define command-line flags
+	var (
+		showVersion = flag.Bool("version", false, "show version and exit")
+		versionShort = flag.Bool("v", false, "show version and exit")
+		maxSizeMB = flag.Int("max-size", 1, "maximum log file size in MB before rotation")
+		maxFiles = flag.Int("max-files", 10, "maximum number of rotated files to keep")
+		showHelp = flag.Bool("help", false, "show help and exit")
+		helpShort = flag.Bool("h", false, "show help and exit")
+	)
+
+	flag.Parse()
+
+	// Handle version flag
+	if *showVersion || *versionShort {
 		fmt.Printf("go-syslog %s\n", version)
 		os.Exit(0)
 	}
 
+	// Handle help flag
+	if *showHelp || *helpShort {
+		fmt.Printf("go-syslog %s - High-performance syslog server with built-in log rotation\n\n", version)
+		fmt.Println("Usage:")
+		fmt.Printf("  %s [options]\n\n", os.Args[0])
+		fmt.Println("Options:")
+		flag.PrintDefaults()
+		fmt.Println("\nExamples:")
+		fmt.Printf("  %s                          # Use defaults (1MB, 10 files)\n", os.Args[0])
+		fmt.Printf("  %s -max-size 5 -max-files 20  # 5MB files, keep 20\n", os.Args[0])
+		os.Exit(0)
+	}
+
+	// Validate parameters
+	if *maxSizeMB <= 0 {
+		log.Fatalf("Error: max-size must be greater than 0")
+	}
+	if *maxFiles <= 0 {
+		log.Fatalf("Error: max-files must be greater than 0")
+	}
+
+	maxSizeBytes := int64(*maxSizeMB * 1024 * 1024)
+
 	// Set log output to stderr to avoid feedback loop with our own syslog
 	log.SetOutput(os.Stderr)
 	log.Printf("Starting go-syslog server %s", version)
+	log.Printf("Configuration: max-size=%dMB (%d bytes), max-files=%d", *maxSizeMB, maxSizeBytes, *maxFiles)
 
-	server := NewSyslogServer()
+	server := NewSyslogServer(maxSizeBytes, *maxFiles)
 	defer server.Close()
 
 	if err := server.Start(); err != nil {
